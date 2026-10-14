@@ -1,0 +1,145 @@
+﻿{
+  "//": "=================== OS996 build tasks ===================",
+  "//A": "cmake uses an absolute path, so tasks do not depend on PATH",
+  "//B": "The configure task also prepends the ninja dir, CMake needs to find the generator",
+  "//C": "F5 runs \"CMake: build\" first (wired via preLaunchTask in launch.json)",
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CMake: configure",
+      "type": "shell",
+      "command": "D:/cubeMXIDE/STM32CubeIDE_2.1.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.cmake.win32_1.1.101.202603101401/tools/bin/cmake.exe",
+      "args": [
+        "--preset",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PATH": "D:/cubeMXIDE/STM32CubeIDE_2.1.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.ninja.win32_1.1.100.202601091506/tools/bin;D:/arm-gnu-toolchain/bin;C:/Windows/system32;C:/Windows"
+        }
+      },
+      "problemMatcher": [],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      }
+    },
+    {
+      "label": "CMake: build",
+      "type": "shell",
+      "command": "D:/cubeMXIDE/STM32CubeIDE_2.1.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.cmake.win32_1.1.101.202603101401/tools/bin/cmake.exe",
+      "args": [
+        "--build",
+        "--preset",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PATH": "D:/cubeMXIDE/STM32CubeIDE_2.1.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.ninja.win32_1.1.100.202601091506/tools/bin;D:/arm-gnu-toolchain/bin;C:/Windows/system32;C:/Windows"
+        }
+      },
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      }
+    },
+    {
+      "label": "CMake: clean",
+      "type": "shell",
+      "command": "D:/cubeMXIDE/STM32CubeIDE_2.1.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.cmake.win32_1.1.101.202603101401/tools/bin/cmake.exe",
+      "args": [
+        "--build",
+        "--preset",
+        "Debug",
+        "--target",
+        "clean"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake: reconfigure (fresh)",
+      "type": "shell",
+      "command": "D:/cubeMXIDE/STM32CubeIDE_2.1.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.cmake.win32_1.1.101.202603101401/tools/bin/cmake.exe",
+      "args": [
+        "--preset",
+        "Debug",
+        "--fresh"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PATH": "D:/cubeMXIDE/STM32CubeIDE_2.1.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.ninja.win32_1.1.100.202601091506/tools/bin;D:/arm-gnu-toolchain/bin;C:/Windows/system32;C:/Windows"
+        }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      }
+    },
+    {
+      "label": "Show size (Flash/RAM usage)",
+      "type": "shell",
+      "command": "D:/arm-gnu-toolchain/bin/arm-none-eabi-size.exe",
+      "args": [
+        "${workspaceFolder}/build/Debug/OS996.elf"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      }
+    },
+    {
+      "label": "Make hex + bin",
+      "type": "shell",
+      "command": "D:/arm-gnu-toolchain/bin/arm-none-eabi-objcopy.exe",
+      "args": [
+        "-O",
+        "ihex",
+        "${workspaceFolder}/build/Debug/OS996.elf",
+        "${workspaceFolder}/build/Debug/OS996.hex"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "dependsOn": "Make bin"
+    },
+    {
+      "label": "Make bin",
+      "type": "shell",
+      "command": "D:/arm-gnu-toolchain/bin/arm-none-eabi-objcopy.exe",
+      "args": [
+        "-O",
+        "binary",
+        "${workspaceFolder}/build/Debug/OS996.elf",
+        "${workspaceFolder}/build/Debug/OS996.bin"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
