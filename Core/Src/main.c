@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include "bsp_gxht30.h"
 #include "bsp_pir.h"
+#include "bsp_mq2.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -159,6 +160,10 @@ int main(void)
   printf("========================================\r\n");
   printf("  SYSCLK  = %lu Hz\r\n", (unsigned long)SystemCoreClock);
   printf("  HAL tick= %lu\r\n", (unsigned long)HAL_GetTick());
+
+   /* 启动 ADC + DMA（必须在 osKernelStart() 之前！）*/
+  mq2_init();
+  printf("  ADC1+DMA started (MQ-2 gas sensor)\r\n");
 
   /* 启动时扫描一次 I2C 总线，确认 SHT30 在线 */
   //i2c_scan();
@@ -726,6 +731,9 @@ void StartSensorTask(void *argument)
 {
   /* USER CODE BEGIN StartSensorTask */
   // Infinite loop 
+  uint16_t gas_raw = 0;
+  float    gas_v = 0.0f;
+  uint16_t gas_flt = 0;
   float    temp = 0.0f;
   float    humi = 0.0f;
   int      pir_state = PIR_NO_MOTION;
@@ -786,16 +794,22 @@ void StartSensorTask(void *argument)
 
       int ret = gxht30_read(&temp, &humi);
 
+      gas_raw = mq2_read_raw();
+      gas_flt = mq2_read();
+      gas_v   = mq2_read_voltage();
+
       if (ret == GXHT30_OK)
       {
         ok++;
         int32_t t100 = (int32_t)(temp * 100.0f);
         int32_t h100 = (int32_t)(humi * 100.0f);
 
-        printf("[DATA] T=%ld.%02ld C  H=%ld.%02ld %%RH  PIR=%s   (ok=%lu i2c=%lu crc=%lu)\r\n",
+        printf("[DATA] T=%ld.%02ld C  H=%ld.%02ld %%RH  PIR=%s GAS=%ldmV (raw=%u flt=%u)  (ok=%lu i2c=%lu crc=%lu)\r\n",
                (long)(t100 / 100), (long)(t100 % 100),
                (long)(h100 / 100), (long)(h100 % 100),
                warming_up ? "warmup" : (pir_state ? "1" : "0"),
+               (long)(gas_v * 1000.0f),      /* 电压转成 mV，用整数打印 */
+               (unsigned)gas_raw,(unsigned)gas_flt,
                (unsigned long)ok, (unsigned long)err_i2c, (unsigned long)err_crc);
       }
       else if (ret == GXHT30_ERR_I2C)
