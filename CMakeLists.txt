@@ -46,6 +46,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     Core/Src/bsp_gxht30.c
+    Core/Src/bsp_pir.c
 )
 
 # Add include paths

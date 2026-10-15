@@ -1,4 +1,4 @@
-﻿/* USER CODE BEGIN Header */
+/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * @file           : main.c
@@ -27,6 +27,7 @@
 #include "cmsis_os.h"
 #include <stdio.h>
 #include "bsp_gxht30.h"
+#include "bsp_pir.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -724,43 +725,93 @@ void StartDefaultTask(void *argument)
 void StartSensorTask(void *argument)
 {
   /* USER CODE BEGIN StartSensorTask */
-  /* Infinite loop */
-   float temp = 0.0f;
-  float humi = 0.0f;
-  uint32_t ok = 0, err_i2c = 0, err_crc = 0;   /* 统计三种结果出现次数 */
+  // Infinite loop 
+  float    temp = 0.0f;
+  float    humi = 0.0f;
+  int      pir_state = PIR_NO_MOTION;
+  uint32_t tick_cnt = 0;
+  uint32_t ok = 0, err_i2c = 0, err_crc = 0;   // 统计三种结果出现次数 
 
-  printf("[SensorTask] started\r\n");
+  printf("[SensorTask] started, stack free = %lu words\r\n",
+       (unsigned long)uxTaskGetStackHighWaterMark(NULL));
+
+   /* ================================================================
+   * PIR 预热阶段
+   * ================================================================
+   * HC-SR501 手册："通电后有一分钟左右的初始化时间，在此期间模块会
+   * 间隔地输出 0-3 次，一分钟后进入待机状态。"
+   *
+   * 所以这 60 秒内必须【丢弃】PIR 的读数，否则会误报"有人"。
+   * 注意这里仍然调用 pir_read() —— 让内部状态机正常运转，
+   * 只是不打印结果。
+   * ================================================================ */
+
+  printf("[SensorTask] PIR warming up, please wait 60s...\r\n");
+
+  /*for (uint32_t i = 0; i < 60; i++)
+  {
+      pir_read();          // 让状态机跑，但结果不输出
+      osDelay(1000);
+  }
+
+  //预热结束，重置状态
+  pir_reset();
+  pir_state = PIR_NO_MOTION;*/
+
+  uint32_t warmup_cnt = 0;
+  int warming_up = 1;
 
   for(;;)
   {
-    int ret = gxht30_read(&temp, &humi);
-
-    if (ret == GXHT30_OK)
+    if(warming_up){
+      pir_read();
+      if(++warmup_cnt >= 1200){
+        warming_up = 0;
+        pir_reset();
+        printf("[SensorTask] PIR ready\r\n");
+        }
+      }else{
+        //50ms读一次PIR
+        int now = pir_read();
+        if(now != pir_state){
+        pir_state = now;
+        printf("[PIR] %s\r\n",
+               pir_state ? "motion DETECTED" : "motion cleared");
+        }
+      }
+     //2s读一次温湿度
+     if (++tick_cnt >= 40)      // 40 × 50ms = 2000ms
     {
-      ok++;
-      /* ★ printf 不支持浮点（newlib-nano），拆成整数打印 */
-      int32_t t_int = (int32_t)(temp * 100.0f);   /* 放大 100 倍变整数 */
-      int32_t h_int = (int32_t)(humi * 100.0f);
+      tick_cnt = 0;
 
-      printf("[SensorTask] T = %ld.%02ld C   H = %ld.%02ld %%RH   (ok=%lu i2c=%lu crc=%lu)\r\n",
-             (long)(t_int / 100), (long)(t_int % 100 < 0 ? -(t_int % 100) : t_int % 100),
-             (long)(h_int / 100), (long)(h_int % 100),
-             (unsigned long)ok, (unsigned long)err_i2c, (unsigned long)err_crc);
-    }
-    else if (ret == GXHT30_ERR_I2C)
-    {
-      err_i2c++;
-      printf("[SensorTask] I2C ERROR  (ok=%lu i2c=%lu crc=%lu)\r\n",
-             (unsigned long)ok, (unsigned long)err_i2c, (unsigned long)err_crc);
-    }
-    else
-    {
-      err_crc++;
-      printf("[SensorTask] CRC ERROR  (ok=%lu i2c=%lu crc=%lu)\r\n",
-             (unsigned long)ok, (unsigned long)err_i2c, (unsigned long)err_crc);
-    }
+      int ret = gxht30_read(&temp, &humi);
 
-    osDelay(2000);      /* 2 秒读一次 */
+      if (ret == GXHT30_OK)
+      {
+        ok++;
+        int32_t t100 = (int32_t)(temp * 100.0f);
+        int32_t h100 = (int32_t)(humi * 100.0f);
+
+        printf("[DATA] T=%ld.%02ld C  H=%ld.%02ld %%RH  PIR=%s   (ok=%lu i2c=%lu crc=%lu)\r\n",
+               (long)(t100 / 100), (long)(t100 % 100),
+               (long)(h100 / 100), (long)(h100 % 100),
+               warming_up ? "warmup" : (pir_state ? "1" : "0"),
+               (unsigned long)ok, (unsigned long)err_i2c, (unsigned long)err_crc);
+      }
+      else if (ret == GXHT30_ERR_I2C)
+      {
+        err_i2c++;
+        printf("[DATA] I2C ERROR  (ok=%lu i2c=%lu crc=%lu)\r\n",
+               (unsigned long)ok, (unsigned long)err_i2c, (unsigned long)err_crc);
+      }
+      else
+      {
+        err_crc++;
+        printf("[DATA] CRC ERROR  (ok=%lu i2c=%lu crc=%lu)\r\n",
+               (unsigned long)ok, (unsigned long)err_i2c, (unsigned long)err_crc);
+      }
+    }  
+    osDelay(50);
   }
   /* USER CODE END StartSensorTask */
 }
