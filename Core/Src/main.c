@@ -910,7 +910,7 @@ void startAlarmtask(void *argument)
    *   用"连续 N 次满足才成立"来消抖，和 PIR 的消抖是同一个思路。
    * ================================================================== */
 
-  #define GAS_ALARM_THRESHOLD_MV   100      /* ★ 报警阈值，单位 mV */
+  #define GAS_ALARM_THRESHOLD_MV   1000      /* ★ 报警阈值，单位 mV */
   #define ALARM_DEBOUNCE_CNT       6         /* 连续 6 次满足才认定 */
   #define ALARM_EVAL_PERIOD_MS     50        /* 评估周期 */
 
