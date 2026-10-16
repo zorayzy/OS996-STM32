@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/bsp_gxht30.c
     Core/Src/bsp_pir.c
     Core/Src/bsp_mq2.c
+    Core/Src/bsp_alarm.c 
 )
 
 # Add include paths

@@ -17,18 +17,17 @@
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
-//#include "main.h"
-//#include "cmsis_os.h"
-//#include "stdio.h"
+#include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "main.h"
-#include "cmsis_os.h"
 #include <stdio.h>
 #include "bsp_gxht30.h"
 #include "bsp_pir.h"
 #include "bsp_mq2.h"
+#include "app_data.h"
+#include "bsp_alarm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -87,7 +86,17 @@ const osThreadAttr_t DisoalyTask_attributes = {
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
+/* Definitions for AlarmTask */
+osThreadId_t AlarmTaskHandle;
+const osThreadAttr_t AlarmTask_attributes = {
+  .name = "AlarmTask",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityNormal1,
+};
 /* USER CODE BEGIN PV */
+
+/* 传感器数据队列：SensorTask 发送 → AlarmTask 接收 */
+osMessageQueueId_t SensorQueueHandle;
 
 /* USER CODE END PV */
 
@@ -104,6 +113,7 @@ void StartDefaultTask(void *argument);
 void StartSensorTask(void *argument);
 void StartCommTask(void *argument);
 void StartDisplayTask(void *argument);
+void startAlarmtask(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -187,6 +197,18 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
+  /* ------------------------------------------------------------------
+   * 创建传感器数据队列
+   * ------------------------------------------------------------------
+   * 参数 1：最多存几个元素 —— 3 个足够（生产者每 50ms 一个，
+   *         消费者处理只需几十微秒，几乎不会堆积）
+   * 参数 2：每个元素的字节数 —— ★ 用 sizeof 让编译器算，不可能写错
+   * 参数 3：NULL = 动态分配
+   * ------------------------------------------------------------------ */
+  SensorQueueHandle = osMessageQueueNew(3, sizeof(sensor_data_t), NULL);
+  if (SensorQueueHandle == NULL) {
+      Error_Handler();          /* 堆不够时返回 NULL，必须判空 */
+  }
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -201,6 +223,9 @@ int main(void)
 
   /* creation of DisoalyTask */
   DisoalyTaskHandle = osThreadNew(StartDisplayTask, NULL, &DisoalyTask_attributes);
+
+  /* creation of AlarmTask */
+  AlarmTaskHandle = osThreadNew(startAlarmtask, NULL, &AlarmTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -558,7 +583,7 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-#include <stdio.h>
+//#include <stdio.h>
 
 /**
   * @brief  重定向 printf 到 USART1（板载 CH340）
@@ -687,35 +712,14 @@ void StartDefaultTask(void *argument)
    * 注意：必须用 osDelay()，不能用 HAL_Delay()
    *       —— HAL 的时基已经换成 TIM6，但仍然应该让出 CPU 给其他任务
    * ------------------------------------------------------------------ */
-  uint32_t cnt = 0;
 
   printf("[DefaultTask] started,stack free = %u words\r\n",
         (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
   for(;;)
   {
-    /* LED0（PF9 / DS0）：计数偶数次时点亮 */
-    if ((cnt % 2) == 0) {
-      HAL_GPIO_WritePin(GPIOF, LED0_Pin, GPIO_PIN_RESET);   /* 亮 */
-      HAL_GPIO_WritePin(GPIOF, LED1_Pin, GPIO_PIN_SET);     /* 灭 */
-    } else {
-      HAL_GPIO_WritePin(GPIOF, LED0_Pin, GPIO_PIN_SET);     /* 灭 */
-      HAL_GPIO_WritePin(GPIOF, LED1_Pin, GPIO_PIN_RESET);   /* 亮 */
-    }
 
-    /* ---- 测量 printf 到底花了多少时间 ---- */
-    //uint32_t t0 = HAL_GetTick();          /* 打印前读时间戳 */
-
-    printf("[%lu] LED toggle, cnt = %lu\r\n",
-           (unsigned long)HAL_GetTick(), (unsigned long)cnt);
-
-    //uint32_t t1 = HAL_GetTick();          /* 打印后立刻读时间戳 */
-    //printf("       ^^^ printf cost = %lu ms\r\n",
-    //       (unsigned long)(t1 - t0));
-
-    cnt++;
-
-    osDelay(500);   /* 500ms */
+    osDelay(1000);   /* 1000ms */
   }
   /* USER CODE END 5 */
 }
@@ -732,13 +736,15 @@ void StartSensorTask(void *argument)
   /* USER CODE BEGIN StartSensorTask */
   // Infinite loop 
   uint16_t gas_raw = 0;
-  float    gas_v = 0.0f;
+  //float    gas_v = 0.0f;
   uint16_t gas_flt = 0;
   float    temp = 0.0f;
   float    humi = 0.0f;
   int      pir_state = PIR_NO_MOTION;
   uint32_t tick_cnt = 0;
   uint32_t ok = 0, err_i2c = 0, err_crc = 0;   // 统计三种结果出现次数 
+  sensor_data_t tx;                            /* 要发送的数据 */
+  //uint16_t gas_raw_local = 0;                  
 
   printf("[SensorTask] started, stack free = %lu words\r\n",
        (unsigned long)uxTaskGetStackHighWaterMark(NULL));
@@ -787,6 +793,18 @@ void StartSensorTask(void *argument)
                pir_state ? "motion DETECTED" : "motion cleared");
         }
       }
+
+    /* ---- ★ 每 50ms 组装并发送一次数据给 AlarmTask ---- */
+    tx.temp    = temp;
+    tx.humi    = humi;
+    tx.pir     = (uint8_t)pir_state;
+    tx.gas_raw = mq2_read_raw();
+    tx.gas_v   = mq2_read_voltage();
+    tx.tick    = HAL_GetTick();
+
+    /* 超时 0 = 不等待。队列满就丢弃这一条（对周期数据合理） */
+    osMessageQueuePut(SensorQueueHandle, &tx, 0, 0);
+
      //2s读一次温湿度
      if (++tick_cnt >= 40)      // 40 × 50ms = 2000ms
     {
@@ -796,7 +814,7 @@ void StartSensorTask(void *argument)
 
       gas_raw = mq2_read_raw();
       gas_flt = mq2_read();
-      gas_v   = mq2_read_voltage();
+      //gas_v   = mq2_read_voltage();
 
       if (ret == GXHT30_OK)
       {
@@ -808,7 +826,7 @@ void StartSensorTask(void *argument)
                (long)(t100 / 100), (long)(t100 % 100),
                (long)(h100 / 100), (long)(h100 % 100),
                warming_up ? "warmup" : (pir_state ? "1" : "0"),
-               (long)(gas_v * 1000.0f),      /* 电压转成 mV，用整数打印 */
+               (long)(tx.gas_v * 1000.0f),      /* 电压转成 mV，用整数打印 */
                (unsigned)gas_raw,(unsigned)gas_flt,
                (unsigned long)ok, (unsigned long)err_i2c, (unsigned long)err_crc);
       }
@@ -864,6 +882,106 @@ void StartDisplayTask(void *argument)
     osDelay(1);
   }
   /* USER CODE END StartDisplayTask */
+}
+
+/* USER CODE BEGIN Header_startAlarmtask */
+/**
+* @brief Function implementing the AlarmTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_startAlarmtask */
+void startAlarmtask(void *argument)
+{
+  /* USER CODE BEGIN startAlarmtask */
+  /* Infinite loop */
+  /* ==================================================================
+   * 告警任务 —— 场景联动
+   * ==================================================================
+   * 职责：
+   *   ① 【独占】LED0 / LED1 / 蜂鸣器 三个执行器（其他任务不碰）
+   *   ② 从 SensorQueue 接收传感器数据
+   *   ③ 判断报警条件，驱动执行器
+   *
+   * 报警条件：气体电压 > 阈值  且  PIR 检测到有人
+   *
+   * 为什么要"去抖"：
+   *   报警条件可能在阈值附近快速反复变化 → LED/蜂鸣器会抖动。
+   *   用"连续 N 次满足才成立"来消抖，和 PIR 的消抖是同一个思路。
+   * ================================================================== */
+
+  #define GAS_ALARM_THRESHOLD_MV   100      /* ★ 报警阈值，单位 mV */
+  #define ALARM_DEBOUNCE_CNT       6         /* 连续 6 次满足才认定 */
+  #define ALARM_EVAL_PERIOD_MS     50        /* 评估周期 */
+
+  sensor_data_t rx;
+  int      alarm_on     = 0;                   /* 当前报警状态 */
+  uint8_t  cond_cnt     = 0;                   /* 条件连续满足次数 */
+  uint32_t blink_cnt    = 0;                   /* 报警闪烁计数 */
+
+  alarm_all_off();                             /* 上电先全部关闭 */
+
+  printf("[AlarmTask] started, stack free = %lu words\r\n",
+         (unsigned long)uxTaskGetStackHighWaterMark(NULL));
+  printf("[AlarmTask] threshold = %d mV, need PIR=1 AND gas above threshold\r\n",
+         GAS_ALARM_THRESHOLD_MV);
+
+  for(;;)
+  {
+    /* ---- 1) 从队列收数据（最多等 50ms）---- */
+    if (osMessageQueueGet(SensorQueueHandle, &rx, NULL, ALARM_EVAL_PERIOD_MS) == osOK)
+    {
+      /* ---- 2) 判断报警条件 ---- */
+      int cond = (rx.gas_v * 1000.0f > GAS_ALARM_THRESHOLD_MV) && (rx.pir == 1);
+
+      if (cond) {
+          if (cond_cnt < ALARM_DEBOUNCE_CNT) cond_cnt++;
+      } else {
+          cond_cnt = 0;                        /* 条件不成立，计数清零 */
+      }
+
+      int want_alarm = (cond_cnt >= ALARM_DEBOUNCE_CNT);
+
+      /* ---- 3) 状态变化时打印一次（避免刷屏）---- */
+      if (want_alarm != alarm_on)
+      {
+          alarm_on = want_alarm;
+          if (alarm_on) {
+              printf("[ALARM] *** ON ***  gas=%ldmV pir=%u\r\n",
+                     (long)(rx.gas_v * 1000.0f), rx.pir);
+          } else {
+              printf("[ALARM] --- OFF ---  gas=%ldmV pir=%u\r\n",
+                     (long)(rx.gas_v * 1000.0f), rx.pir);
+              alarm_all_off();
+          }
+      }
+    }
+    else
+    {
+      /* 超时没收到数据（不应该发生）——当作正常评估一次超时处理 */
+    }
+
+    /* ---- 4) 驱动执行器 ---- */
+    if (alarm_on)
+    {
+      /* 报警状态：LED0 + 蜂鸣器 以 250ms 为半周期闪烁鸣叫 */
+      blink_cnt++;
+      uint8_t phase = (uint8_t)((blink_cnt / 5) % 2);   /* 5×50ms = 250ms */
+
+      alarm_led_red(phase);
+      alarm_beep(phase);
+      alarm_led_green(0);                   /* 绿灭 */
+    }
+    else
+    {
+      /* 正常状态：绿灯常亮表示"系统运行中"，红灯和蜂鸣器灭 */
+      blink_cnt = 0;
+      alarm_led_red(0);
+      alarm_beep(0);
+      alarm_led_green(1);
+    }
+  }
+  /* USER CODE END startAlarmtask */
 }
 
 /**
