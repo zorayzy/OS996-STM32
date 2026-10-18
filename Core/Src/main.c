@@ -28,6 +28,8 @@
 #include "bsp_mq2.h"
 #include "app_data.h"
 #include "bsp_alarm.h"
+#include "bsp_protocol.h"
+#include "cJSON.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,14 +64,14 @@ DMA_HandleTypeDef hdma_usart2_tx;
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for SensorTask */
 osThreadId_t SensorTaskHandle;
 const osThreadAttr_t SensorTask_attributes = {
   .name = "SensorTask",
-  .stack_size = 256 * 4,
+  .stack_size = 768 * 4,
   .priority = (osPriority_t) osPriorityNormal1,
 };
 /* Definitions for CommTask */
@@ -83,14 +85,14 @@ const osThreadAttr_t CommTask_attributes = {
 osThreadId_t DisoalyTaskHandle;
 const osThreadAttr_t DisoalyTask_attributes = {
   .name = "DisoalyTask",
-  .stack_size = 256 * 4,
+  .stack_size = 384 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
 /* Definitions for AlarmTask */
 osThreadId_t AlarmTaskHandle;
 const osThreadAttr_t AlarmTask_attributes = {
   .name = "AlarmTask",
-  .stack_size = 256 * 4,
+  .stack_size = 768 * 4,
   .priority = (osPriority_t) osPriorityNormal1,
 };
 /* USER CODE BEGIN PV */
@@ -829,6 +831,69 @@ void StartSensorTask(void *argument)
                (long)(tx.gas_v * 1000.0f),      /* 电压转成 mV，用整数打印 */
                (unsigned)gas_raw,(unsigned)gas_flt,
                (unsigned long)ok, (unsigned long)err_i2c, (unsigned long)err_crc);
+
+        /* ================================================================
+         * 通过 USART2 给 ESP32 发送一帧传感器数据（JSON 载荷）
+         * ================================================================
+         * 用 cJSON 组包，再交给帧协议封装。
+         *
+         * 为什么用 cJSON 而不是 snprintf 拼字符串？
+         *   ① 转义安全：字符串里有引号/反斜杠时自动转义
+         *   ② 结构清晰：增删字段只改一处，不会漏逗号
+         *   ③ 浮点处理：cJSON_AddNumberToObject 内部处理精度
+         *   ④ 可反向解析：收到的指令也用同一套库解
+         * ================================================================ */
+          static uint32_t seq = 0;
+
+          cJSON *root = cJSON_CreateObject();
+          if (root != NULL)
+          {
+            cJSON_AddNumberToObject(root, "t",    temp);   /* 温度，直接传 float */
+            cJSON_AddNumberToObject(root, "h",    humi);   /* 湿度 */
+            cJSON_AddNumberToObject(root, "pir",  pir_state);
+            cJSON_AddNumberToObject(root, "gas",  tx.gas_v);      /* 电压(V) */
+            cJSON_AddNumberToObject(root, "raw",  gas_raw);       /* ADC 原始值 */
+            cJSON_AddNumberToObject(root, "flt",  gas_flt);       /* EMA 滤波后 */
+            cJSON_AddNumberToObject(root, "warm", warming_up);
+            cJSON_AddNumberToObject(root, "seq",  seq++);
+            cJSON_AddNumberToObject(root, "ok",   ok);
+            cJSON_AddNumberToObject(root, "ierr", err_i2c);
+            cJSON_AddNumberToObject(root, "cerr", err_crc);
+
+            /* cJSON_PrintUnformatted = 无空格紧凑格式（省带宽）
+             * ★ 它返回 malloc 出来的字符串，用完必须 free！ */
+            char *json = cJSON_PrintUnformatted(root);
+
+            if (json != NULL)
+            {
+                int r = proto_send_json(CMD_SENSOR_UP, json, 100);
+                if (r != 0)
+                {
+                    printf("[PROTO] send failed: %d\r\n", r);
+                }
+                cJSON_free(json);      /* ★ 不 free 会内存泄漏，最终 malloc 失败 */
+            }
+            else
+            {
+                printf("[PROTO] cJSON_Print failed (out of memory?)\r\n");
+            }
+
+            cJSON_Delete(root);        /* ★ 释放整个对象树 */
+          }
+          else
+          {
+            printf("[PROTO] cJSON_CreateObject failed\r\n");
+          }
+        /* ---- 每 30 秒打印一次内存状况（查泄漏 / 查栈够不够）---- */
+        static uint32_t heap_log_cnt = 0;
+        if (++heap_log_cnt >= 15)
+        {
+            heap_log_cnt = 0;
+            printf("[MEM] heap=%luB(min %lu) stack=%luW  <- watch these two\r\n",
+                   (unsigned long)xPortGetFreeHeapSize(),
+                   (unsigned long)xPortGetMinimumEverFreeHeapSize(),
+                   (unsigned long)uxTaskGetStackHighWaterMark(NULL));
+        }         
       }
       else if (ret == GXHT30_ERR_I2C)
       {
@@ -923,8 +988,10 @@ void startAlarmtask(void *argument)
 
   printf("[AlarmTask] started, stack free = %lu words\r\n",
          (unsigned long)uxTaskGetStackHighWaterMark(NULL));
-  printf("[AlarmTask] threshold = %d mV, need PIR=1 AND gas above threshold\r\n",
+  printf("[AlarmTask] threshold = %d mV, need PIR=1 + gas above\r\n",
          GAS_ALARM_THRESHOLD_MV);
+  printf("[AlarmTask] stack after 3 printfs = %lu words\r\n",
+         (unsigned long)uxTaskGetStackHighWaterMark(NULL));
 
   for(;;)
   {

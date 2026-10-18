@@ -49,11 +49,14 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/bsp_pir.c
     Core/Src/bsp_mq2.c
     Core/Src/bsp_alarm.c 
+    Core/Src/bsp_protocol.c
+    Core/cJSON/cJSON.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
+    Core/cJSON
 )
 
 # Add project symbols (macros)
@@ -63,6 +66,29 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
+
+# ------------------------------------------------------------------
+# 启用 newlib-nano 的浮点格式化支持
+# ------------------------------------------------------------------
+# 为什么需要：
+#   newlib-nano 为了省空间，默认【不支持】%f / %lf 等浮点格式，
+#   只支持整数。cJSON 在序列化 double 时会调用 sprintf("%1.15g", ...)，
+#   不启用就会链接失败：undefined reference to `_printf_float`
+#
+# 代价：
+#   Flash 增加约 6~10 KB（拉入 vfprintf 的浮点分支）
+#
+# -Wl,-u,_printf_float  的含义：
+#   -Wl,    把后面的参数原样传给链接器 ld
+#   -u      强制"未定义符号"，即强制把 _printf_float 这个符号
+#           拉进最终镜像（即使没有直接引用它也保留）
+#
+# 注意：开启后 printf 的浮点【仅在需要时】才走浮点分支，
+#       整数格式的性能和体积不受影响。
+# ------------------------------------------------------------------
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+    -Wl,-u,_printf_float
+)
 
 # Add linked libraries
 target_link_libraries(${CMAKE_PROJECT_NAME}
