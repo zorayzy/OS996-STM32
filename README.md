@@ -2,7 +2,7 @@
 
 基于 **STM32F407ZET6 + FreeRTOS** 的多传感器采集与云端联动子系统。
 
-搭配 [ESP32 MQTT 桥接固件](https://github.com/) 组成完整的"端 → 云 → 端"链路。
+搭配 [OS996-ESP32](https://github.com/zorayzy/OS996-ESP32)（MQTT 桥接固件）组成完整的"端 → 云 → 端"链路。
 
 ---
 
