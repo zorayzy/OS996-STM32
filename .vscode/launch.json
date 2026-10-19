@@ -1,9 +1,17 @@
-﻿{
+{
   "//": "=================== OS996 debug config ===================",
-  "//A": "Uses ATK-DAP (ALIENTEK CMSIS-DAP probe, USB VID 04D8/PID 00DF)",
+  "//A": "Uses ATK-DAP (ALIENTEK CMSIS-DAP probe, USB VID 04D8/PID 00DF).",
   "//B": "IMPORTANT: .vscode/atk-dap.cfg forces 'cmsis-dap backend hid'.",
   "//C": "Without it OpenOCD's default backend 'auto' tries usb_bulk first,",
   "//D": "fails, and exits with 'unable to find a matching CMSIS-DAP device'.",
+  "//E": "---- Paths you may need to adjust ----",
+  "//F": "OpenOCD path uses ${env:USERPROFILE} so it works on any machine",
+  "//G": "  that installed OpenOCD via PlatformIO.",
+  "//H": "armToolchainPath below is NOT portable - change it to wherever",
+  "//I": "  your arm-none-eabi-gcc lives. Examples:",
+  "//J": "    Windows : D:/arm-gnu-toolchain/bin",
+  "//K": "    Linux   : /opt/arm-gnu-toolchain/bin",
+  "//L": "    macOS   : /Applications/ArmGNUToolchain/13.3.rel1/arm-none-eabi/bin",
   "version": "0.2.0",
   "configurations": [
     {
@@ -11,19 +19,20 @@
       "type": "cortex-debug",
       "request": "launch",
       "servertype": "openocd",
-      "serverpath": "C:/Users/28062/.platformio/packages/tool-openocd/bin/openocd.exe",
+      "serverpath": "${env:USERPROFILE}/.platformio/packages/tool-openocd/bin/openocd.exe",
       "searchDir": [
-        "C:/Users/28062/.platformio/packages/tool-openocd/openocd/scripts"
+        "${env:USERPROFILE}/.platformio/packages/tool-openocd/openocd/scripts"
       ],
       "configFiles": [
         "${workspaceFolder}/.vscode/atk-dap.cfg",
         "target/stm32f4x.cfg"
       ],
 
-      "//E": "Board MCU reported by OpenOCD: device id 0x101f6413 = STM32F407xE (512KB flash).",
-      "//F": "The CubeMX project is configured as ZGT6 (1024KB); harmless while code < 512KB.",
+      "//M": "Board MCU reported by OpenOCD: device id 0x101f6413 = STM32F407xE (512KB flash).",
+      "//N": "The CubeMX project is configured as ZGT6 (1024KB); harmless while code < 512KB.",
       "device": "STM32F407ZET6",
 
+      "//O": "★ Change this to your own toolchain location",
       "armToolchainPath": "D:/arm-gnu-toolchain/bin",
       "executable": "${workspaceFolder}/build/Debug/OS996.elf",
       "cwd": "${workspaceFolder}",
@@ -31,7 +40,7 @@
       "runToEntryPoint": "main",
       "preLaunchTask": "CMake: build",
 
-      "//G": "Set to \"raw\" if you need to inspect GDB transactions when debugging",
+      "//P": "Set to \"raw\" if you need to inspect GDB transactions when debugging",
       "showDevDebugOutput": "none",
       "breakAfterReset": false
     },
@@ -40,15 +49,16 @@
       "type": "cortex-debug",
       "request": "attach",
       "servertype": "openocd",
-      "serverpath": "C:/Users/28062/.platformio/packages/tool-openocd/bin/openocd.exe",
+      "serverpath": "${env:USERPROFILE}/.platformio/packages/tool-openocd/bin/openocd.exe",
       "searchDir": [
-        "C:/Users/28062/.platformio/packages/tool-openocd/openocd/scripts"
+        "${env:USERPROFILE}/.platformio/packages/tool-openocd/openocd/scripts"
       ],
       "configFiles": [
         "${workspaceFolder}/.vscode/atk-dap.cfg",
         "target/stm32f4x.cfg"
       ],
       "device": "STM32F407ZET6",
+      "//O": "★ Change this to your own toolchain location",
       "armToolchainPath": "D:/arm-gnu-toolchain/bin",
       "executable": "${workspaceFolder}/build/Debug/OS996.elf",
       "cwd": "${workspaceFolder}"
