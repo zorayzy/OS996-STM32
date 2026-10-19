@@ -92,4 +92,74 @@ int proto_send_frame(uint8_t cmd, const uint8_t *payload, uint8_t len,
   */
 int proto_send_json(uint8_t cmd, const char *json, uint32_t timeout);
 
+
+/* ==================================================================
+ *  接收部分（阶段 2）
+ * ==================================================================
+ *  接收架构：DMA 循环接收 + 任务内轮询解析
+ *
+ *  为什么不用"空闲中断(IDLE)"或"逐字节接收中断"？
+ *  ------------------------------------------------------------------
+ *   逐字节接收中断：
+ *      115200 bps 下每秒最多 11520 字节 → 也就是每秒上万次中断，
+ *      CPU 大量时间花在进出中断上。不可取。
+ *
+ *   DMA + 空闲中断（IDLE）：
+ *      效率高，但需要 ISR 与任务之间同步（临界区 / 队列 / 信号量），
+ *      而且 IDLE 只能表示"这一阵数据发完了"，不能保证是一整帧。
+ *
+ *   ★ DMA 循环 + 任务轮询（本项目采用）：
+ *      DMA 硬件把收到的字节自动写进环形缓冲区，永不停止；
+ *      任务里定期读 DMA 的"剩余计数"算出新到了多少字节，
+ *      把这几个字节喂给解析状态机。
+ *      → 无中断，无并发，解析全在一个上下文里，最简单也最安全。
+ *      → 代价：任务轮询有延迟（最大一个轮询周期），
+ *              对"每 2 秒一帧"的场景完全可接受。
+ * ================================================================== */
+
+/* 收到一帧（完整且 CRC 正确）时的回调
+ *
+ * cmd     : CMD_SENSOR_UP / CMD_CTRL_DOWN / ...
+ * payload : 载荷指针（★ 不是以 '\0' 结尾的！）
+ * len     : 载荷长度
+ *
+ * ★ 注意：payload 指向模块内部的静态缓冲区，
+ *   回调返回后内容可能被下一帧覆盖。
+ *   如果需要长期保存，必须在回调里拷贝出来。 */
+typedef void (*proto_frame_handler_t)(uint8_t cmd, const uint8_t *payload,
+                                      uint16_t len);
+
+/* 接收统计（调试用） */
+typedef struct {
+    uint32_t bytes_in;      /* 累计收到的字节数 */
+    uint32_t frames_ok;     /* 完整且 CRC 正确的帧数 */
+    uint32_t err_crc;       /* CRC 校验失败的次数 */
+    uint32_t err_len;       /* LEN 超过上限的次数 */
+    uint32_t err_overflow;  /* 环形缓冲区来不及处理而丢数据的次数 */
+} proto_rx_stats_t;
+
+/**
+  * @brief  启动 DMA 接收（只需调用一次）
+  * @note   在 osKernelStart() 之前调用，调度器一启动就能收数据。
+  */
+void proto_rx_init(void);
+
+/**
+  * @brief  在任务里周期调用：处理环形缓冲区里的新字节
+  * @note   建议 10~50ms 调一次。内部会驱动解析状态机，
+  *         收满一帧且 CRC 正确时自动调用已注册的回调。
+  */
+void proto_rx_poll(void);
+
+/**
+  * @brief  注册帧处理回调
+  * @param  h  回调函数；传 NULL 表示不处理（只统计）
+  */
+void proto_set_handler(proto_frame_handler_t h);
+
+/**
+  * @brief  获取接收统计
+  */
+const proto_rx_stats_t *proto_get_rx_stats(void);
+
 #endif /* __BSP_PROTOCOL_H */

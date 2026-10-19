@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include <string.h>          /* memcpy / memset，协议载荷处理要用 */
 #include "bsp_gxht30.h"
 #include "bsp_pir.h"
 #include "bsp_mq2.h"
@@ -101,6 +102,9 @@ const osThreadAttr_t AlarmTask_attributes = {
 /* 传感器数据队列：SensorTask 发送 → AlarmTask 接收 */
 osMessageQueueId_t SensorQueueHandle;
 
+/* 手动控制请求：CommTask（云端指令）写 → AlarmTask 读并合并 */
+ctrl_request_t g_ctrl_req;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -122,6 +126,13 @@ void startAlarmtask(void *argument);
 
 /* 用户函数声明（避免隐式声明警告） */
 void i2c_scan(void);
+
+/* 协议帧回调：收到一帧完整且 CRC 正确的帧时，由 proto_rx_poll 内部调用。
+ * 注册处：main() 的 USER CODE BEGIN 2 */
+static void on_frame_received(uint8_t cmd, const uint8_t *payload, uint16_t len);
+
+/* 处理 CMD_CTRL_DOWN（云端下发的控制指令） */
+static void handle_ctrl_down(const uint8_t *payload, uint16_t len);
 
 /* USER CODE END PFP */
 
@@ -177,6 +188,22 @@ int main(void)
    /* 启动 ADC + DMA（必须在 osKernelStart() 之前！）*/
   mq2_init();
   printf("  ADC1+DMA started (MQ-2 gas sensor)\r\n");
+
+  /* ------------------------------------------------------------------
+   * 启动 USART2 的 DMA 接收 + 注册帧回调
+   * ------------------------------------------------------------------
+   * 为什么在调度器启动【之前】就启动 DMA？
+   *   ① 外设初始化统一放在 main 里，任务启动时环境已就绪
+   *   ② DMA 一启动就开始往环形缓冲区攒数据，
+   *      不会因为"任务还没跑起来"而丢掉开头的几帧
+   *
+   * 为什么这里可以安全地注册回调？
+   *   proto_set_handler 只是给一个函数指针赋值，不涉及 RTOS。
+   *   回调真正被调用是在 CommTask 的 proto_rx_poll 里。
+   * ------------------------------------------------------------------ */
+  proto_set_handler(on_frame_received);
+  proto_rx_init();
+  printf("  USART2 RX armed (protocol parser ready)\r\n");
 
   /* 启动时扫描一次 I2C 总线，确认 SHT30 在线 */
   //i2c_scan();
@@ -697,6 +724,135 @@ void i2c_scan(void)
 
     log_printf("=== scan done ===\r\n\r\n");
 }
+
+
+/* ==================================================================
+ *  协议帧接收处理（阶段 2）
+ * ==================================================================
+ *  调用链：
+ *      USART2 ──DMA──> 环形缓冲区
+ *                          │
+ *                    CommTask: proto_rx_poll()
+ *                          │
+ *                    解析状态机（找帧头→CMD→LEN→载荷→CRC）
+ *                          │ CRC 正确
+ *                          ▼
+ *                    on_frame_received()   ← 本函数
+ *                          │
+ *                    按 CMD 分派
+ *                          ▼
+ *                    handle_ctrl_down() → 写 g_ctrl_req
+ *                          │
+ *                    AlarmTask 读取并合并到执行器输出
+ * ================================================================== */
+
+/**
+  * @brief  收到一帧完整且 CRC 正确的帧
+  * @param  cmd     指令类型
+  * @param  payload 载荷（★ 不是 '\0' 结尾）
+  * @param  len     载荷长度
+  * @note   本函数在 CommTask 上下文里执行，可以直接用 log_printf。
+  */
+static void on_frame_received(uint8_t cmd, const uint8_t *payload, uint16_t len)
+{
+    log_printf("[RX] <<< frame: cmd=0x%02X len=%u\r\n",
+               (unsigned)cmd, (unsigned)len);
+
+    /* 载荷是 JSON 文本，用 %.*s 打印（精度限制长度，
+     * 这样即使 payload 不是 '\0' 结尾也不会读越界） */
+    if (len > 0U) {
+        log_printf("[RX]     payload: %.*s\r\n", (int)len, (const char *)payload);
+    }
+
+    switch (cmd)
+    {
+    case CMD_CTRL_DOWN:
+        handle_ctrl_down(payload, len);
+        break;
+
+    case CMD_SENSOR_UP:
+        /* 收到自己发出去的数据（回显测试时会走到这里）——
+         * 说明解析链路正常，不需要处理内容，打一条日志即可 */
+        log_printf("[RX]     (sensor frame looped back - parser OK)\r\n");
+        break;
+
+    case CMD_ACK:
+    case CMD_HEARTBEAT:
+        log_printf("[RX]     (ack/heartbeat, no action)\r\n");
+        break;
+
+    default:
+        log_printf("[RX]     unknown cmd 0x%02X, ignored\r\n", (unsigned)cmd);
+        break;
+    }
+}
+
+/**
+  * @brief  处理 CMD_CTRL_DOWN：云端下发的控制指令
+  * @param  payload JSON 文本，例如 {"beep":1} 或 {"led":1,"beep":1}
+  * @param  len     载荷长度
+  * @note   不直接操作 GPIO —— 只写 g_ctrl_req，
+  *         由 AlarmTask 统一决定执行器输出（避免资源竞争）。
+  */
+static void handle_ctrl_down(const uint8_t *payload, uint16_t len)
+{
+    /* ★ 必须用 static 而不是栈上数组：
+     *   FRAME_MAX_PAYLOAD+1 = 201 字节，放栈上会让 CommTask 的
+     *   栈瞬间少 201 字节；static 直接放在 .bss 里，零栈开销。
+     *   （只有 CommTask 一个任务调用本函数，所以 static 也安全）*/
+    static char s_json[FRAME_MAX_PAYLOAD + 1U];
+
+    if (len > FRAME_MAX_PAYLOAD) {
+        log_printf("[CTRL] payload too long (%u)\r\n", (unsigned)len);
+        return;
+    }
+
+    /* cJSON 要求以 '\0' 结尾的字符串，但 payload 不是 —— 先拷贝补齐 */
+    memcpy(s_json, payload, len);
+    s_json[len] = '\0';
+
+    cJSON *root = cJSON_Parse(s_json);
+    if (root == NULL) {
+        log_printf("[CTRL] JSON parse FAILED: %s\r\n", s_json);
+        return;
+    }
+
+    /* ---- 取字段。用 GetObjectItem 而不是直接下标，
+     *      因为字段可能不存在（cJSON 会返回 NULL）---- */
+    cJSON *j_beep = cJSON_GetObjectItem(root, "beep");
+    cJSON *j_led  = cJSON_GetObjectItem(root, "led");
+
+    int beep = cJSON_IsNumber(j_beep) ? (int)j_beep->valuedouble : -1;
+    int led  = cJSON_IsNumber(j_led)  ? (int)j_led->valuedouble  : -1;
+
+    log_printf("[CTRL] parsed: beep=%d led=%d\r\n", beep, led);
+
+    /* ---- 写入控制请求（由 AlarmTask 消费）----
+     *
+     * 为什么用"剩余周期数"而不是直接置 1/0：
+     *   如果用户发 {"beep":1} 后忘了发 {"beep":0}，
+     *   蜂鸣器会一直响。用定时脉冲（响 3 秒自动停）更安全，
+     *   也符合"远程测试一下"的真实使用场景。
+     *
+     * 3 秒 = 3000ms ÷ 50ms/周期 = 60 个周期 */
+    if (beep == 1) {
+        g_ctrl_req.beep_remain = 60;      /* 响 3 秒 */
+        log_printf("[CTRL] -> buzzer ON for 3s\r\n");
+    } else if (beep == 0) {
+        g_ctrl_req.beep_remain = 0;       /* 立即停 */
+        log_printf("[CTRL] -> buzzer OFF\r\n");
+    }
+
+    if (led == 1) {
+        g_ctrl_req.led_remain = 60;       /* 红灯亮 3 秒 */
+        log_printf("[CTRL] -> red LED ON for 3s\r\n");
+    } else if (led == 0) {
+        g_ctrl_req.led_remain = 0;
+        log_printf("[CTRL] -> red LED OFF\r\n");
+    }
+
+    cJSON_Delete(root);                   /* ★ 必须释放，否则每帧泄漏约 500 字节 */
+}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -938,10 +1094,48 @@ void StartSensorTask(void *argument)
 void StartCommTask(void *argument)
 {
   /* USER CODE BEGIN StartCommTask */
-  /* Infinite loop */
+  /* ==================================================================
+   * 通信任务 —— 负责 STM32 ↔ ESP32 的帧收发
+   * ==================================================================
+   * 职责：
+   *   ① 轮询 DMA 环形缓冲区，把新字节喂给协议解析状态机
+   *   ② 收满一帧且 CRC 正确时，由回调 on_frame_received 分派处理
+   *
+   * 为什么轮询周期选 20ms？
+   *   · 帧速率：ESP32 每 2 秒最多发几帧 → 20ms 完全够
+   *   · 一帧最大 206 字节，115200 波特率下传输约 18ms
+   *     所以 20ms 内最多积攒约一帧，不会溢出 256 字节缓冲区
+   *   · 20ms × 50 次/秒 = 只占 CPU 极小比例
+   *
+   * 为什么不用更高优先级去"抢"？
+   *   本任务优先级已经是 AboveNormal1(32)，比 SensorTask/AlarmTask 高，
+   *   但 proto_rx_poll 本身几乎不耗时（无数据时只读一次 DMA 计数器），
+   *   所以不会饿死其他任务。
+   * ================================================================== */
+
+  log_printf("[CommTask] started, stack free = %lu words\r\n",
+             (unsigned long)uxTaskGetStackHighWaterMark(NULL));
+  log_printf("[CommTask] listening on USART2 (DMA circular), poll every 20ms\r\n");
+
   for(;;)
   {
-    osDelay(1);
+    /* ---- 核心：处理收到的字节 ---- */
+    proto_rx_poll();
+
+    /* ---- 每 10 秒报告一次接收统计（验证链路健康）---- */
+    static uint32_t stat_cnt = 0;
+    if (++stat_cnt >= 500)              /* 500 × 20ms = 10 秒 */
+    {
+        stat_cnt = 0;
+        const proto_rx_stats_t *st = proto_get_rx_stats();
+        log_printf("[CommTask] rx: bytes=%lu frames=%lu | err: crc=%lu len=%lu\r\n",
+                   (unsigned long)st->bytes_in,
+                   (unsigned long)st->frames_ok,
+                   (unsigned long)st->err_crc,
+                   (unsigned long)st->err_len);
+    }
+
+    osDelay(20);
   }
   /* USER CODE END StartCommTask */
 }
@@ -1043,25 +1237,62 @@ void startAlarmtask(void *argument)
       /* 超时没收到数据（不应该发生）——当作正常评估一次超时处理 */
     }
 
-    /* ---- 4) 驱动执行器 ---- */
+    /* ---- 4) 驱动执行器 ----
+     *
+     * ★ 全工程【只有这里】写 LED 和蜂鸣器。
+     *   SensorTask 采集数据、CommTask 收云端指令，都不直接碰 GPIO，
+     *   这样不存在"两个任务抢同一引脚"的资源竞争。
+     *
+     * 输出 = 自动报警逻辑  OR  手动请求（云端指令）
+     *   手动请求优先级更高：用户主动要求时立刻响应。
+     *   手动请求是"限时脉冲"（默认 3 秒），到期自动回落，
+     *   不会因为用户忘了发关闭指令而一直响。 */
+
+    uint8_t out_red   = 0;
+    uint8_t out_beep  = 0;
+    uint8_t out_green = 1;      /* 默认绿灯常亮 = 系统运行中 */
+
+    /* ---- ① 自动报警逻辑 ---- */
     if (alarm_on)
     {
-      /* 报警状态：LED0 + 蜂鸣器 以 250ms 为半周期闪烁鸣叫 */
+      /* 报警：LED0 + 蜂鸣器 以 250ms 为半周期闪烁鸣叫 */
       blink_cnt++;
       uint8_t phase = (uint8_t)((blink_cnt / 5) % 2);   /* 5×50ms = 250ms */
 
-      alarm_led_red(phase);
-      alarm_beep(phase);
-      alarm_led_green(0);                   /* 绿灭 */
+      out_red   = phase;
+      out_beep  = phase;
+      out_green = 0;            /* 报警时绿灭 */
     }
     else
     {
-      /* 正常状态：绿灯常亮表示"系统运行中"，红灯和蜂鸣器灭 */
       blink_cnt = 0;
-      alarm_led_red(0);
-      alarm_beep(0);
-      alarm_led_green(1);
+      out_red   = 0;
+      out_beep  = 0;
+      out_green = 1;
     }
+
+    /* ---- ② 手动请求叠加（云端指令，限时脉冲）----
+     *
+     * "先判断再递减"的顺序很重要：
+     *   如果先递减后判断，在 remain 从 1 减到 0 的那一周期里
+     *   会少亮一个周期（off-by-one）。
+     *   先输出、后递减，保证 remain=N 时正好输出 N 个周期。 */
+    if (g_ctrl_req.led_remain > 0U)
+    {
+      out_red = 1;
+      g_ctrl_req.led_remain--;
+    }
+
+    if (g_ctrl_req.beep_remain > 0U)
+    {
+      out_beep = 1;
+      g_ctrl_req.beep_remain--;
+    }
+
+    /* ---- ③ 统一输出（唯一一处写 GPIO）---- */
+    alarm_led_red(out_red);
+    alarm_beep(out_beep);
+    alarm_led_green(out_green);
   }
   /* USER CODE END startAlarmtask */
 }
