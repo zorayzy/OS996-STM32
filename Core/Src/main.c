@@ -30,6 +30,7 @@
 #include "bsp_alarm.h"
 #include "bsp_protocol.h"
 #include "cJSON.h"
+#include "log.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -187,6 +188,20 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
+   /* ------------------------------------------------------------------
+   * 创建日志互斥量
+   * ------------------------------------------------------------------
+   * 为什么放在这里？
+   *   ① 必须在 osKernelInitialize() 【之后】
+   *      —— osMutexNew 需要内核控制块已初始化
+   *   ② 必须在内核中最后一个任务创建【之前】
+   *      —— 否则任务一启动就调用 log_printf，拿到 NULL 指针
+   *   ③ 必须在 osKernelStart() 【之前】
+   *      —— 调度器启动后就不能安全地创建内核对象了
+   *
+   * 这个位置正好满足全部三个条件。
+   * ------------------------------------------------------------------ */
+  log_init();
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -624,8 +639,8 @@ void i2c_scan(void)
     uint8_t hits[128] = {0};         /* 每个地址被命中的次数 */
     uint8_t found = 0;
 
-    printf("\r\n=== I2C1 bus scan (SCL=PB8, SDA=PB9) ===\r\n");
-    printf("  scanning %u passes, only addresses that answer EVERY time are real\r\n",
+    log_printf("\r\n=== I2C1 bus scan (SCL=PB8, SDA=PB9) ===\r\n");
+    log_printf("  scanning %u passes, only addresses that answer EVERY time are real\r\n",
            SCAN_PASSES);
 
     for (uint8_t pass = 0; pass < SCAN_PASSES; pass++)
@@ -643,44 +658,44 @@ void i2c_scan(void)
     }
 
     /* 只报告每次都有应答的地址 —— 那才是真实设备 */
-    printf("  --- confirmed devices ---\r\n");
+    log_printf("  --- confirmed devices ---\r\n");
     for (uint8_t addr = 1; addr < 128; addr++)
     {
         if (hits[addr] == SCAN_PASSES)
         {
-            printf("  0x%02X  (7-bit)   answered %u/%u\r\n",
+            log_printf("  0x%02X  (7-bit)   answered %u/%u\r\n",
                    addr, hits[addr], SCAN_PASSES);
             found++;
         }
     }
 
     /* 偶尔应答的，单独列出来 —— 这些是总线误判或干扰 */
-    printf("  --- unreliable (ghost) addresses ---\r\n");
+    log_printf("  --- unreliable (ghost) addresses ---\r\n");
     {
         uint8_t ghost = 0;
         for (uint8_t addr = 1; addr < 128; addr++)
         {
             if (hits[addr] > 0 && hits[addr] < SCAN_PASSES)
             {
-                printf("  0x%02X  (7-bit)   answered %u/%u  <-- NOT a real device\r\n",
+                log_printf("  0x%02X  (7-bit)   answered %u/%u  <-- NOT a real device\r\n",
                        addr, hits[addr], SCAN_PASSES);
                 ghost++;
             }
         }
-        if (ghost == 0) printf("  (none - bus is clean)\r\n");
+        if (ghost == 0) log_printf("  (none - bus is clean)\r\n");
     }
 
     if (found == 0)
     {
-        printf("  NO confirmed device!\r\n");
-        printf("  check: VCC=3.3V / SCL=PB8 / SDA=PB9 / GND\r\n");
+        log_printf("  NO confirmed device!\r\n");
+        log_printf("  check: VCC=3.3V / SCL=PB8 / SDA=PB9 / GND\r\n");
     }
     else
     {
-        printf("  total: %u confirmed device(s)\r\n", found);
+        log_printf("  total: %u confirmed device(s)\r\n", found);
     }
 
-    printf("=== scan done ===\r\n\r\n");
+    log_printf("=== scan done ===\r\n\r\n");
 }
 /* USER CODE END 4 */
 
@@ -715,7 +730,7 @@ void StartDefaultTask(void *argument)
    *       —— HAL 的时基已经换成 TIM6，但仍然应该让出 CPU 给其他任务
    * ------------------------------------------------------------------ */
 
-  printf("[DefaultTask] started,stack free = %u words\r\n",
+  log_printf("[DefaultTask] started,stack free = %u words\r\n",
         (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
   for(;;)
@@ -748,7 +763,7 @@ void StartSensorTask(void *argument)
   sensor_data_t tx;                            /* 要发送的数据 */
   //uint16_t gas_raw_local = 0;                  
 
-  printf("[SensorTask] started, stack free = %lu words\r\n",
+  log_printf("[SensorTask] started, stack free = %lu words\r\n",
        (unsigned long)uxTaskGetStackHighWaterMark(NULL));
 
    /* ================================================================
@@ -762,7 +777,7 @@ void StartSensorTask(void *argument)
    * 只是不打印结果。
    * ================================================================ */
 
-  printf("[SensorTask] PIR warming up, please wait 60s...\r\n");
+  log_printf("[SensorTask] PIR warming up, please wait 60s...\r\n");
 
   /*for (uint32_t i = 0; i < 60; i++)
   {
@@ -784,14 +799,14 @@ void StartSensorTask(void *argument)
       if(++warmup_cnt >= 1200){
         warming_up = 0;
         pir_reset();
-        printf("[SensorTask] PIR ready\r\n");
+        log_printf("[SensorTask] PIR ready\r\n");
         }
       }else{
         //50ms读一次PIR
         int now = pir_read();
         if(now != pir_state){
         pir_state = now;
-        printf("[PIR] %s\r\n",
+        log_printf("[PIR] %s\r\n",
                pir_state ? "motion DETECTED" : "motion cleared");
         }
       }
@@ -824,7 +839,7 @@ void StartSensorTask(void *argument)
         int32_t t100 = (int32_t)(temp * 100.0f);
         int32_t h100 = (int32_t)(humi * 100.0f);
 
-        printf("[DATA] T=%ld.%02ld C  H=%ld.%02ld %%RH  PIR=%s GAS=%ldmV (raw=%u flt=%u)  (ok=%lu i2c=%lu crc=%lu)\r\n",
+        log_printf("[DATA] T=%ld.%02ld C  H=%ld.%02ld %%RH  PIR=%s GAS=%ldmV (raw=%u flt=%u)  (ok=%lu i2c=%lu crc=%lu)\r\n",
                (long)(t100 / 100), (long)(t100 % 100),
                (long)(h100 / 100), (long)(h100 % 100),
                warming_up ? "warmup" : (pir_state ? "1" : "0"),
@@ -869,27 +884,27 @@ void StartSensorTask(void *argument)
                 int r = proto_send_json(CMD_SENSOR_UP, json, 100);
                 if (r != 0)
                 {
-                    printf("[PROTO] send failed: %d\r\n", r);
+                    log_printf("[PROTO] send failed: %d\r\n", r);
                 }
                 cJSON_free(json);      /* ★ 不 free 会内存泄漏，最终 malloc 失败 */
             }
             else
             {
-                printf("[PROTO] cJSON_Print failed (out of memory?)\r\n");
+                log_printf("[PROTO] cJSON_Print failed (out of memory?)\r\n");
             }
 
             cJSON_Delete(root);        /* ★ 释放整个对象树 */
           }
           else
           {
-            printf("[PROTO] cJSON_CreateObject failed\r\n");
+            log_printf("[PROTO] cJSON_CreateObject failed\r\n");
           }
         /* ---- 每 30 秒打印一次内存状况（查泄漏 / 查栈够不够）---- */
         static uint32_t heap_log_cnt = 0;
         if (++heap_log_cnt >= 15)
         {
             heap_log_cnt = 0;
-            printf("[MEM] heap=%luB(min %lu) stack=%luW  <- watch these two\r\n",
+            log_printf("[MEM] heap=%luB(min %lu) stack=%luW  <- watch these two\r\n",
                    (unsigned long)xPortGetFreeHeapSize(),
                    (unsigned long)xPortGetMinimumEverFreeHeapSize(),
                    (unsigned long)uxTaskGetStackHighWaterMark(NULL));
@@ -898,13 +913,13 @@ void StartSensorTask(void *argument)
       else if (ret == GXHT30_ERR_I2C)
       {
         err_i2c++;
-        printf("[DATA] I2C ERROR  (ok=%lu i2c=%lu crc=%lu)\r\n",
+        log_printf("[DATA] I2C ERROR  (ok=%lu i2c=%lu crc=%lu)\r\n",
                (unsigned long)ok, (unsigned long)err_i2c, (unsigned long)err_crc);
       }
       else
       {
         err_crc++;
-        printf("[DATA] CRC ERROR  (ok=%lu i2c=%lu crc=%lu)\r\n",
+        log_printf("[DATA] CRC ERROR  (ok=%lu i2c=%lu crc=%lu)\r\n",
                (unsigned long)ok, (unsigned long)err_i2c, (unsigned long)err_crc);
       }
     }  
@@ -986,11 +1001,11 @@ void startAlarmtask(void *argument)
 
   alarm_all_off();                             /* 上电先全部关闭 */
 
-  printf("[AlarmTask] started, stack free = %lu words\r\n",
+  log_printf("[AlarmTask] started, stack free = %lu words\r\n",
          (unsigned long)uxTaskGetStackHighWaterMark(NULL));
-  printf("[AlarmTask] threshold = %d mV, need PIR=1 + gas above\r\n",
+  log_printf("[AlarmTask] threshold = %d mV, need PIR=1 + gas above\r\n",
          GAS_ALARM_THRESHOLD_MV);
-  printf("[AlarmTask] stack after 3 printfs = %lu words\r\n",
+  log_printf("[AlarmTask] stack after 3 printfs = %lu words\r\n",
          (unsigned long)uxTaskGetStackHighWaterMark(NULL));
 
   for(;;)
@@ -1014,10 +1029,10 @@ void startAlarmtask(void *argument)
       {
           alarm_on = want_alarm;
           if (alarm_on) {
-              printf("[ALARM] *** ON ***  gas=%ldmV pir=%u\r\n",
+              log_printf("[ALARM] *** ON ***  gas=%ldmV pir=%u\r\n",
                      (long)(rx.gas_v * 1000.0f), rx.pir);
           } else {
-              printf("[ALARM] --- OFF ---  gas=%ldmV pir=%u\r\n",
+              log_printf("[ALARM] --- OFF ---  gas=%ldmV pir=%u\r\n",
                      (long)(rx.gas_v * 1000.0f), rx.pir);
               alarm_all_off();
           }

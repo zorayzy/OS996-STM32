@@ -51,6 +51,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/bsp_alarm.c 
     Core/Src/bsp_protocol.c
     Core/cJSON/cJSON.c
+    Core/Src/log.c
 )
 
 # Add include paths

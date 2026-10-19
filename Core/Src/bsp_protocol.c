@@ -1,6 +1,7 @@
 #include "bsp_protocol.h"
 #include <stdio.h>
 #include <string.h>
+#include "log.h"
 
 /* ==================================================================
  *  调试开关
@@ -89,19 +90,14 @@ int proto_send_frame(uint8_t cmd, const uint8_t *payload, uint8_t len,
     uint16_t total = (uint16_t)(FRAME_OVERHEAD + len);
 
 #if PROTO_DEBUG_HEX
-    /* ---- 调试：把整帧打印成十六进制 ---- */
-    printf("[PROTO] TX %u bytes:", (unsigned)total);
-    for (uint16_t i = 0; i < total; i++)
-    {
-        printf(" %02X", s_frame[i]);
-    }
-    printf("\r\n");
+    /* 用 log_hex：内部会分行、加锁、一次性发送 */
+    log_hex("[PROTO] TX", s_frame, total);
 #endif
 
     /* ---- 发送 ---- */
     if (HAL_UART_Transmit(&huart2, s_frame, total, timeout) != HAL_OK)
     {
-        printf("[PROTO] UART2 transmit FAILED\r\n");
+        log_printf("[PROTO] UART2 transmit FAILED\r\n");
         return -2;
     }
 
@@ -121,7 +117,7 @@ int proto_send_json(uint8_t cmd, const char *json, uint32_t timeout)
     size_t n = strlen(json);
     if (n > FRAME_MAX_PAYLOAD)
     {
-        printf("[PROTO] JSON too long (%u > %u)\r\n",
+        log_printf("[PROTO] JSON too long (%u > %u)\r\n",
                (unsigned)n, (unsigned)FRAME_MAX_PAYLOAD);
         return -1;
     }
